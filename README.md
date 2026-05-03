@@ -1,6 +1,6 @@
-# MolGraphX
+# GraphMolAI
 
-MolGraphX is a production-style molecular property prediction project that compares classical fingerprint baselines against Graph Neural Networks on MoleculeNet datasets. It downloads data automatically, trains both model families, evaluates them with task-appropriate metrics, and produces a simple atom-level interpretability report for GNN predictions.
+GraphMolAI is a production-style molecular property prediction project that compares classical fingerprint baselines against Graph Neural Networks on MoleculeNet datasets. It downloads data automatically, trains both model families, evaluates them with task-appropriate metrics, and produces a simple atom-level interpretability report for GNN predictions.
 
 ## Features
 

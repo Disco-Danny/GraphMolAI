@@ -1,0 +1,106 @@
+PROJECT:
+GraphMolAI
+
+MAIN QUESTION:
+can smart graph models read molecules better than old fixed methods?
+
+GOAL:
+predict molecule behavior from structure
+compare 5 methods
+
+DATA:
+ESOL:
+how well molecule mixes in water
+
+BBBP:
+can molecule enter brain or not
+
+MOLECULE IDEA:
+think of molecule like a map
+atom = place
+bond = road
+
+WHY THIS STUDY:
+old method uses fixed code made before training
+graph model learns by itself from atom-road map
+
+MODELS:
+1. baseline
+old simple method
+turn molecule into fixed number code
+like summary notes
+
+2. MPNN
+atoms talk to nearby atoms
+like friends sharing info
+
+3. attention gnn
+same idea, but listens more to important neighbors
+like paying more attention to key people
+
+4. mpnn++
+stronger mpnn
+better at keeping useful info
+like upgraded version
+
+5. gat
+graph attention network
+also shows what parts got most attention
+like showing where model looked most
+
+WHY 5:
+baseline = old reference
+mpnn = basic graph learner
+attention gnn = weighted graph learner
+mpnn++ = stronger graph learner
+gat = graph learner with visible attention
+
+METHOD:
+1. load data
+2. split into train, val, test
+train = learn
+val = check while learning
+test = final exam
+3. train all models
+4. compare scores
+5. make plots
+6. highlight important atoms
+
+METRICS:
+ESOL:
+RMSE, MAE
+both = how wrong prediction is
+smaller better
+
+BBBP:
+ROC-AUC, Accuracy
+both = how well yes/no guess works
+bigger better
+
+ATTENTION:
+shows which atoms model focused on more
+
+ATOM IMPORTANCE:
+shows which atoms changed prediction most
+
+INTERPRETABILITY:
+means human can inspect model reason better
+not full mind reading
+just better clues
+
+OUTPUTS:
+score tables
+plots
+sample predictions
+atom score files
+attention pictures
+
+MAIN IDEA:
+if graph models beat baseline,
+learning from full atom-road map helps
+
+if mpnn++ or gat best,
+stronger graph design helps more
+
+FINAL POINT:
+this project tests if molecule-as-graph is better than fixed summary code

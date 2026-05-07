@@ -9,6 +9,8 @@ import torch
 from molgraphx.data.loaders.dataset import load_dataset_bundle, set_random_seed
 from molgraphx.evaluation.evaluate import (
     aggregate_seed_results,
+    generate_metric_plots,
+    load_results,
     plot_model_comparison,
     print_sample_predictions,
     render_metrics_table,
@@ -21,8 +23,9 @@ from molgraphx.interpretability.atom_importance import (
     format_atom_importance,
     save_atom_importance,
 )
+from molgraphx.interpretability.visualize_attention import visualize_attention
 from molgraphx.models.baseline.fingerprint_model import FingerprintBaselineModel
-from molgraphx.models.gnn import AttentionGNN, MPNN, MPNNPlusPlus
+from molgraphx.models.gnn import AttentionGNN, GAT, MPNN, MPNNPlusPlus
 from molgraphx.training.trainer import Trainer
 from molgraphx.utils.config import ExperimentConfig, ensure_output_dirs, normalize_dataset_name
 
@@ -46,6 +49,12 @@ GNN_VARIANTS = {
         "result_key": "mpnnpp",
         "class": MPNNPlusPlus,
     },
+    "gat": {
+        "display_name": "GAT",
+        "artifact_key": "gat",
+        "result_key": "gat",
+        "class": GAT,
+    },
 }
 
 
@@ -54,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", choices=["baseline", "gnn", "both"], default="both")
     parser.add_argument(
         "--gnn-type",
-        choices=["mpnn", "attention", "mpnnpp", "all"],
+        choices=["mpnn", "attention", "mpnnpp", "gat", "all"],
         default="all",
         help="GNN variant to train when --model is gnn or both.",
     )
@@ -83,6 +92,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--fingerprint-bits", type=int, default=2048)
     parser.add_argument("--fingerprint-radius", type=int, default=2)
+    parser.add_argument("--explain", type=lambda x: str(x).lower() == "true", default=False)
+    parser.add_argument("--plots-only", type=lambda x: str(x).lower() == "true", default=False)
     return parser.parse_args()
 
 
@@ -143,7 +154,7 @@ def build_gnn_model(config: ExperimentConfig, dataset_bundle, variant: str) -> t
 
 def resolve_gnn_variants(gnn_type: str) -> list[str]:
     if gnn_type == "all":
-        return ["mpnn", "attention", "mpnnpp"]
+        return ["mpnn", "attention", "mpnnpp", "gat"]
     return [gnn_type]
 
 
@@ -153,6 +164,7 @@ def run_gnn_variant(
     directories: dict[str, Path],
     variant: str,
     run_suffix: str = "",
+    explain: bool = False,
 ) -> tuple[dict[str, float], object]:
     variant_info = GNN_VARIANTS[variant]
     display_name = str(variant_info["display_name"])
@@ -226,6 +238,11 @@ def run_gnn_variant(
             report,
             directories["interpretability"] / f"{config.dataset_name.lower()}_atom_importance.json",
         )
+    if explain and variant == "gat":
+        image_path = Path("outputs") / "attention" / f"{config.dataset_name.lower()}_{artifact_key}{run_suffix}.png"
+        scores, saved_path = visualize_attention(trainer.model, explanation_target, image_path, device)
+        print(f"Saved attention visualization to {saved_path}")
+        print(f"Attention scores: {[round(score, 4) for score in scores]}")
     return artifacts.metrics, artifacts
 
 
@@ -253,7 +270,7 @@ def run_single_experiment(
 
     if args.model in {"gnn", "both"}:
         for variant in resolve_gnn_variants(args.gnn_type):
-            gnn_metrics, _ = run_gnn_variant(config, dataset_bundle, directories, variant, run_suffix)
+            gnn_metrics, _ = run_gnn_variant(config, dataset_bundle, directories, variant, run_suffix, args.explain)
             results[str(GNN_VARIANTS[variant]["result_key"])] = gnn_metrics
 
     return results
@@ -284,6 +301,19 @@ def main() -> None:
     directories = ensure_output_dirs(config)
     seeds = parse_seeds(args)
 
+    if args.plots_only:
+        suffix = "_multiseed_summary" if len(seeds) > 1 else "_metrics"
+        json_path = directories["results"] / f"{config.dataset_name.lower()}{suffix}.json"
+        results = load_results(json_path)
+        primary_metric, lower_is_better = primary_metric_for_task(config.task_type)
+        metric_name = f"{primary_metric}_mean" if len(seeds) > 1 else primary_metric
+        comparison_name = f"{config.dataset_name.lower()}_multiseed_comparison.png" if len(seeds) > 1 else f"{config.dataset_name.lower()}_comparison.png"
+        prefix = f"{config.dataset_name.lower()}_multiseed" if len(seeds) > 1 else config.dataset_name.lower()
+        plot_model_comparison(results, directories["plots"] / comparison_name, metric_name, lower_is_better)
+        generate_metric_plots(results, directories["plots"], prefix, config.task_type)
+        print(f"Regenerated plots from {json_path}.")
+        return
+
     if len(seeds) > 1:
         seed_results: list[dict[str, object]] = []
         for seed in seeds:
@@ -309,6 +339,7 @@ def main() -> None:
             f"{primary_metric}_mean",
             lower_is_better,
         )
+        generate_metric_plots(summary, directories["plots"], f"{config.dataset_name.lower()}_multiseed", config.task_type)
         print(f"\nSaved multi-seed runs to {runs_path}.")
         print(f"Saved multi-seed summary to {summary_csv_path} and {summary_json_path}.")
         return
@@ -326,6 +357,7 @@ def main() -> None:
             primary_metric,
             lower_is_better,
         )
+        generate_metric_plots(results, directories["plots"], config.dataset_name.lower(), config.task_type)
         print(f"\nSaved metrics to {json_path} and {csv_path}.")
 
 

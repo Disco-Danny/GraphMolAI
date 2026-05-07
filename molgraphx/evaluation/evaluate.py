@@ -50,6 +50,12 @@ def save_results(
     return json_path, csv_path
 
 
+def load_results(json_path: Path) -> dict[str, dict[str, float]]:
+    with json_path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    return {str(model): {str(metric): float(value) for metric, value in metrics.items()} for model, metrics in data.items()}
+
+
 def print_sample_predictions(model_name: str, predictions: np.ndarray, targets: np.ndarray, max_items: int = 5) -> None:
     print(f"\nSample predictions from {model_name}:")
     for index, (prediction, target) in enumerate(zip(predictions[:max_items], targets[:max_items]), start=1):
@@ -149,4 +155,70 @@ def plot_model_comparison(
     plt.xticks(rotation=20, ha="right")
     plt.tight_layout()
     plt.savefig(output_path, dpi=220)
+    plt.close()
+
+
+def generate_metric_plots(
+    results: dict[str, dict[str, float]],
+    output_dir: Path,
+    prefix: str,
+    task_type: str,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metrics = sorted({metric for model_metrics in results.values() for metric in model_metrics})
+    models = list(results)
+    lower_is_better = {"rmse", "mae", "rmse_mean", "mae_mean", "rmse_std", "mae_std"}
+
+    for metric in metrics:
+        values = [results[model].get(metric, np.nan) for model in models]
+        plt.figure(figsize=(8, 4.5))
+        plt.bar(models, values, color=["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2"][: len(models)])
+        plt.ylabel(metric.upper())
+        plt.title(f"{metric} by model")
+        plt.xticks(rotation=20, ha="right")
+        plt.tight_layout()
+        plt.savefig(output_dir / f"{prefix}_{metric}.png", dpi=220)
+        plt.close()
+
+    matrix = np.array([[results[model].get(metric, np.nan) for metric in metrics] for model in models], dtype=float)
+    score = matrix.copy()
+    for idx, metric in enumerate(metrics):
+        column = score[:, idx]
+        finite = np.isfinite(column)
+        if not finite.any():
+            continue
+        min_v, max_v = np.nanmin(column), np.nanmax(column)
+        if max_v - min_v < 1e-12:
+            score[finite, idx] = 1.0
+        else:
+            norm = (column - min_v) / (max_v - min_v)
+            score[finite, idx] = 1.0 - norm if metric in lower_is_better else norm
+
+    plt.figure(figsize=(1.6 * len(metrics) + 2, 0.7 * len(models) + 2))
+    plt.imshow(score, cmap="viridis", aspect="auto", vmin=0.0, vmax=1.0)
+    plt.colorbar(label="normalized score")
+    plt.xticks(range(len(metrics)), metrics, rotation=20, ha="right")
+    plt.yticks(range(len(models)), models)
+    plt.title(f"{task_type} metric heatmap")
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{prefix}_heatmap.png", dpi=220)
+    plt.close()
+
+    ranks = np.zeros_like(matrix)
+    for idx, metric in enumerate(metrics):
+        order = np.argsort(matrix[:, idx])
+        if metric not in lower_is_better:
+            order = order[::-1]
+        for rank, model_idx in enumerate(order, start=1):
+            ranks[model_idx, idx] = rank
+
+    plt.figure(figsize=(8, 4.5))
+    for idx, model in enumerate(models):
+        plt.plot(metrics, ranks[idx], marker="o", label=model)
+    plt.gca().invert_yaxis()
+    plt.ylabel("rank")
+    plt.title("Model ranks across metrics")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{prefix}_ranks.png", dpi=220)
     plt.close()

@@ -10,18 +10,20 @@ from torch_geometric.data import Data
 
 def compute_atom_importance(model, data: Data, device: torch.device, task_type: str) -> list[dict[str, float | int | str]]:
     """Compute gradient-based atom importance scores for a single molecule."""
-    model.eval()
+    was_training = model.training
+    model.train()
 
     x = data.x.clone().detach().to(device).requires_grad_(True)
     edge_index = data.edge_index.to(device)
     edge_attr = data.edge_attr.to(device)
     batch = torch.zeros(data.num_nodes, dtype=torch.long, device=device)
 
-    prediction = model(x, edge_index, edge_attr, batch).view(-1)[0]
-    score = torch.sigmoid(prediction) if task_type == "classification" else prediction
+    with torch.backends.cudnn.flags(enabled=False):
+        prediction = model(x, edge_index, edge_attr, batch).view(-1)[0]
+        score = torch.sigmoid(prediction) if task_type == "classification" else prediction
 
-    model.zero_grad(set_to_none=True)
-    score.backward()
+        model.zero_grad(set_to_none=True)
+        score.backward()
 
     gradients = x.grad.detach()
     importance = (gradients * x).abs().sum(dim=1)
@@ -38,6 +40,7 @@ def compute_atom_importance(model, data: Data, device: torch.device, task_type: 
                 "importance": float(importance[atom_index].item()),
             }
         )
+    model.train(was_training)
     return atom_reports
 
 

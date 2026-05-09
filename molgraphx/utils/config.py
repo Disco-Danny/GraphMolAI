@@ -15,42 +15,29 @@ DATASET_TASKS = {
         "target_column": "p_np",
         "raw_filename": "BBBP.csv",
     },
-    "HIV": {
-        "task_type": "classification",
-        "target_column": "HIV_active",
-        "raw_filename": "HIV.csv",
-    },
 }
 
 
 @dataclass(slots=True)
 class ExperimentConfig:
-    dataset_name: str = "ESOL"
+    dataset_name: str = "BBBP"
     batch_size: int = 64
-    hidden_dim: int = 128
-    num_layers: int = 3
-    dropout: float = 0.2
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-5
-    max_epochs: int = 50
+    hidden_dim: int = 32
+    heads: int = 2
+    dropout: float = 0.3
+    learning_rate: float = 3e-4
+    weight_decay: float = 1e-4
+    max_epochs: int = 120
     patience: int = 10
-    scheduler_patience: int = 5
-    grad_clip_norm: float | None = 5.0
-    standardize_targets: bool = True
     test_size: float = 0.2
     val_ratio: float = 0.1
     random_seed: int = 42
     fingerprint_radius: int = 2
     fingerprint_n_bits: int = 2048
-    root_dir: str = "artifacts"
 
     @property
     def task_type(self) -> str:
         return DATASET_TASKS[self.dataset_name]["task_type"]
-
-    @property
-    def output_root(self) -> Path:
-        return Path(self.root_dir) / self.dataset_name.lower()
 
     @property
     def data_root(self) -> Path:
@@ -60,20 +47,18 @@ class ExperimentConfig:
 def normalize_dataset_name(name: str) -> str:
     normalized = name.strip().upper()
     if normalized not in DATASET_TASKS:
-        supported = ", ".join(DATASET_TASKS)
-        raise ValueError(f"Unsupported dataset '{name}'. Supported datasets: {supported}.")
+        raise ValueError("Supported datasets: ESOL, BBBP.")
     return normalized
 
 
-def ensure_output_dirs(config: ExperimentConfig) -> dict[str, Path]:
-    output_root = config.output_root
-    directories = {
-        "root": output_root,
-        "checkpoints": output_root / "checkpoints",
-        "plots": output_root / "plots",
-        "results": output_root / "results",
-        "interpretability": output_root / "interpretability",
+def ensure_output_dirs() -> dict[str, Path]:
+    root = Path("outputs")
+    paths = {
+        "root": root,
+        "plots": root / "plots",
+        "attention": root / "attention",
+        "checkpoints": root / "checkpoints",
     }
-    for path in directories.values():
+    for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
-    return directories
+    return paths

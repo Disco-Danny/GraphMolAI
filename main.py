@@ -1,364 +1,180 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+import time
 from pathlib import Path
 
 import torch
+from rdkit import RDLogger
 
 from molgraphx.data.loaders.dataset import load_dataset_bundle, set_random_seed
-from molgraphx.evaluation.evaluate import (
-    aggregate_seed_results,
-    generate_metric_plots,
-    load_results,
-    plot_model_comparison,
-    print_sample_predictions,
-    render_metrics_table,
-    save_multiseed_results,
-    save_results,
-    save_sample_predictions,
-)
-from molgraphx.interpretability.atom_importance import (
-    compute_atom_importance,
-    format_atom_importance,
-    save_atom_importance,
-)
+from molgraphx.evaluation.evaluate import plot_bar, plot_loss, plot_roc, save_predictions, save_results, write_case_study
 from molgraphx.interpretability.visualize_attention import visualize_attention
-from molgraphx.models.baseline.fingerprint_model import FingerprintBaselineModel
-from molgraphx.models.gnn import AttentionGNN, GAT, MPNN, MPNNPlusPlus
+from molgraphx.models.baseline.fingerprint_model import ECFPBaseline
+from molgraphx.models.gnn import HybridGAT
+from molgraphx.training.metrics import best_f1_threshold, compute_metrics
 from molgraphx.training.trainer import Trainer
 from molgraphx.utils.config import ExperimentConfig, ensure_output_dirs, normalize_dataset_name
 
 
-GNN_VARIANTS = {
-    "mpnn": {
-        "display_name": "MPNN",
-        "artifact_key": "mpnn",
-        "result_key": "mpnn",
-        "class": MPNN,
-    },
-    "attention": {
-        "display_name": "Attention GNN",
-        "artifact_key": "attention_gnn",
-        "result_key": "attention_gnn",
-        "class": AttentionGNN,
-    },
-    "mpnnpp": {
-        "display_name": "MPNN++",
-        "artifact_key": "mpnnpp",
-        "result_key": "mpnnpp",
-        "class": MPNNPlusPlus,
-    },
-    "gat": {
-        "display_name": "GAT",
-        "artifact_key": "gat",
-        "result_key": "gat",
-        "class": GAT,
-    },
-}
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Molecular property prediction with fingerprints and GNNs.")
-    parser.add_argument("--model", choices=["baseline", "gnn", "both"], default="both")
-    parser.add_argument(
-        "--gnn-type",
-        choices=["mpnn", "attention", "mpnnpp", "gat", "all"],
-        default="all",
-        help="GNN variant to train when --model is gnn or both.",
-    )
-    parser.add_argument("--dataset", type=str, default="ESOL", help="Dataset to use: ESOL, BBBP, or HIV.")
-    parser.add_argument("--epochs", type=int, default=50)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="BBBP")
+    parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--hidden-dim", type=int, default=128)
-    parser.add_argument("--num-layers", type=int, default=3)
-    parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-5)
-    parser.add_argument("--patience", type=int, default=10)
-    parser.add_argument("--scheduler-patience", type=int, default=5)
-    parser.add_argument("--grad-clip-norm", type=float, default=5.0)
-    parser.add_argument(
-        "--no-standardize-targets",
-        action="store_true",
-        help="Disable target standardization for regression GNN training.",
-    )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--seeds",
-        type=str,
-        default="",
-        help="Comma-separated seeds for paper-style repeated experiments, e.g. 0,1,2,3,4.",
-    )
-    parser.add_argument("--fingerprint-bits", type=int, default=2048)
-    parser.add_argument("--fingerprint-radius", type=int, default=2)
-    parser.add_argument("--explain", type=lambda x: str(x).lower() == "true", default=False)
-    parser.add_argument("--plots-only", type=lambda x: str(x).lower() == "true", default=False)
     return parser.parse_args()
 
 
-def parse_seeds(args: argparse.Namespace) -> list[int]:
-    if not args.seeds.strip():
-        return [args.seed]
-    return [int(seed.strip()) for seed in args.seeds.split(",") if seed.strip()]
+def regression_stats(dataset: list) -> tuple[float, float]:
+    values = torch.tensor([float(graph.y.item()) for graph in dataset], dtype=torch.float32)
+    return float(values.mean().item()), float(values.std(unbiased=False).item())
 
 
-def primary_metric_for_task(task_type: str) -> tuple[str, bool]:
-    if task_type == "classification":
-        return "roc_auc", False
-    return "rmse", True
+def count_parameters(model: torch.nn.Module) -> int:
+    return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
-def regression_target_stats(dataset: list) -> tuple[float, float]:
-    targets = torch.tensor([float(graph.y.item()) for graph in dataset], dtype=torch.float32)
-    return float(targets.mean().item()), float(targets.std(unbiased=False).item())
+def latency_ms_baseline(model: ECFPBaseline, dataset: list) -> float:
+    start = time.perf_counter()
+    model.predict(dataset)
+    return (time.perf_counter() - start) * 1000.0 / max(len(dataset), 1)
 
 
-def run_baseline(
-    config: ExperimentConfig,
-    dataset_bundle,
-    directories: dict[str, Path],
-    run_suffix: str = "",
-) -> tuple[dict[str, float], object]:
-    print("\nTraining fingerprint baseline...")
-    baseline = FingerprintBaselineModel(
-        task_type=config.task_type,
-        radius=config.fingerprint_radius,
-        n_bits=config.fingerprint_n_bits,
-        random_seed=config.random_seed,
-    )
-    baseline.fit(dataset_bundle.train_dataset)
-    artifacts = baseline.evaluate(dataset_bundle.test_dataset)
-    print(f"Baseline metrics: {artifacts.metrics}")
-    print_sample_predictions("Fingerprint baseline", artifacts.predictions, artifacts.targets)
-    save_sample_predictions(
-        "Fingerprint baseline",
-        artifacts.predictions,
-        artifacts.targets,
-        directories["results"] / f"{config.dataset_name.lower()}_baseline_samples{run_suffix}.json",
-    )
-    return artifacts.metrics, artifacts
+def latency_ms_gnn(trainer: Trainer, loader, device: torch.device) -> float:
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    start = time.perf_counter()
+    trainer.evaluate(loader)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return (time.perf_counter() - start) * 1000.0 / max(len(loader.dataset), 1)
 
 
-def build_gnn_model(config: ExperimentConfig, dataset_bundle, variant: str) -> torch.nn.Module:
-    model_class = GNN_VARIANTS[variant]["class"]
-    return model_class(
-        num_node_features=dataset_bundle.num_node_features,
-        num_edge_features=dataset_bundle.num_edge_features,
-        hidden_dim=config.hidden_dim,
-        num_layers=config.num_layers,
-        dropout=config.dropout,
-        output_dim=1,
-    )
+def tune_baseline_threshold(model: ECFPBaseline, val_dataset: list) -> float:
+    _, y_true = model._extract_xy(val_dataset)
+    predictions = model.predict(val_dataset)
+    return best_f1_threshold(y_true, predictions)
 
 
-def resolve_gnn_variants(gnn_type: str) -> list[str]:
-    if gnn_type == "all":
-        return ["mpnn", "attention", "mpnnpp", "gat"]
-    return [gnn_type]
-
-
-def run_gnn_variant(
-    config: ExperimentConfig,
-    dataset_bundle,
-    directories: dict[str, Path],
-    variant: str,
-    run_suffix: str = "",
-    explain: bool = False,
-) -> tuple[dict[str, float], object]:
-    variant_info = GNN_VARIANTS[variant]
-    display_name = str(variant_info["display_name"])
-    artifact_key = str(variant_info["artifact_key"])
-
-    print(f"\nTraining {display_name}...")
-    train_loader, val_loader, test_loader = dataset_bundle.build_loaders(config.batch_size)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    target_mean, target_std = regression_target_stats(dataset_bundle.train_dataset)
-
+def main() -> None:
+    args = parse_args()
+    RDLogger.DisableLog("rdApp.*")
+    dataset_name = normalize_dataset_name(args.dataset)
+    output_dirs = ensure_output_dirs()
+    config = ExperimentConfig(dataset_name=dataset_name, batch_size=args.batch_size, max_epochs=args.epochs, random_seed=args.seed)
     set_random_seed(config.random_seed)
-    model = build_gnn_model(config, dataset_bundle, variant)
+    
+    print(f"\n===== MolGraphX Training =====")
+    print(f"Dataset: {dataset_name}")
+    print(f"Config: hidden_dim={config.hidden_dim}, heads={config.heads}, dropout={config.dropout}")
+    print(f"Training epochs: {config.max_epochs}, batch_size: {config.batch_size}")
+    print(f"Loading dataset...")
+    
+    bundle = load_dataset_bundle(config)
+    print(f"✓ Dataset loaded: {len(bundle.train_dataset)} train, {len(bundle.val_dataset)} val, {len(bundle.test_dataset)} test")
+    print(f"  Node features: {bundle.num_node_features}, Edge features: {bundle.num_edge_features}, FP dim: {bundle.fingerprint_dim}")
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"✓ Device: {device}")
+    
+    train_loader, val_loader, test_loader = bundle.build_loaders(config.batch_size)
+
+    print(f"\n--- Training Baseline (ECFP + LR) ---")
+    baseline = ECFPBaseline(bundle.task_type, random_seed=config.random_seed)
+    baseline.fit(bundle.train_dataset)
+    baseline_artifacts = baseline.evaluate(bundle.test_dataset)
+    baseline_metrics = dict(baseline_artifacts.metrics)
+    if bundle.task_type == "classification":
+        baseline_metrics = compute_metrics(bundle.task_type, baseline_artifacts.targets, baseline_artifacts.predictions, threshold=tune_baseline_threshold(baseline, bundle.val_dataset))
+    baseline_metrics["params"] = 0.0
+    baseline_metrics["epoch_time"] = 0.0
+    baseline_metrics["latency_ms"] = latency_ms_baseline(baseline, bundle.test_dataset)
+    print(f"✓ Baseline complete - ROC-AUC: {baseline_metrics.get('roc_auc', baseline_metrics.get('rmse', 0)):.4f}")
+
+    print(f"\n--- Training Hybrid ECFP + GAT ---")
+    target_mean, target_std = regression_stats(bundle.train_dataset)
+    hybrid = HybridGAT(
+        num_node_features=bundle.num_node_features,
+        num_edge_features=bundle.num_edge_features,
+        fingerprint_dim=bundle.fingerprint_dim,
+        hidden_dim=config.hidden_dim,
+        heads=config.heads,
+        dropout=config.dropout,
+    )
     trainer = Trainer(
-        model=model,
-        task_type=config.task_type,
+        model=hybrid,
+        task_type=bundle.task_type,
         device=device,
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
         max_epochs=config.max_epochs,
         patience=config.patience,
-        checkpoint_path=directories["checkpoints"] / f"{config.dataset_name.lower()}_{artifact_key}{run_suffix}.pt",
-        standardize_targets=config.standardize_targets,
+        checkpoint_path=output_dirs["checkpoints"] / f"{dataset_name.lower()}_hybrid_gat.pt",
         target_mean=target_mean,
         target_std=target_std,
-        scheduler_patience=config.scheduler_patience,
-        grad_clip_norm=config.grad_clip_norm,
     )
-
+    print(f"Training started... (patience={config.patience})")
     history = trainer.train(train_loader, val_loader)
-    trainer.plot_history(
-        history,
-        directories["plots"] / f"{config.dataset_name.lower()}_{artifact_key}_training_curve{run_suffix}.png",
-    )
-    trainer.save_history(
-        history,
-        directories["results"] / f"{config.dataset_name.lower()}_{artifact_key}_history{run_suffix}.json",
-    )
-    if variant == "mpnn" and not run_suffix:
-        trainer.plot_history(history, directories["plots"] / f"{config.dataset_name.lower()}_training_curve.png")
-        trainer.save_history(history, directories["results"] / f"{config.dataset_name.lower()}_history.json")
+    print(f"✓ Training complete after {len(history['epoch_time'])} epochs")
+    
+    print(f"\n--- Evaluating Hybrid ECFP + GAT ---")
+    hybrid_artifacts = trainer.evaluate(test_loader)
+    hybrid_metrics = dict(hybrid_artifacts.metrics)
+    hybrid_metrics["params"] = float(count_parameters(hybrid))
+    hybrid_metrics["epoch_time"] = float(sum(history["epoch_time"]) / max(len(history["epoch_time"]), 1))
+    hybrid_metrics["latency_ms"] = latency_ms_gnn(trainer, test_loader, device)
+    print(f"✓ Hybrid evaluation complete - ROC-AUC: {hybrid_metrics.get('roc_auc', hybrid_metrics.get('rmse', 0)):.4f}")
 
-    artifacts = trainer.evaluate(test_loader)
-    print(f"{display_name} metrics: {artifacts.metrics}")
-    print_sample_predictions(display_name, artifacts.predictions, artifacts.targets)
-    save_sample_predictions(
-        display_name,
-        artifacts.predictions,
-        artifacts.targets,
-        directories["results"] / f"{config.dataset_name.lower()}_{artifact_key}_samples{run_suffix}.json",
-    )
-    if variant == "mpnn" and not run_suffix:
-        save_sample_predictions(
-            "GNN",
-            artifacts.predictions,
-            artifacts.targets,
-            directories["results"] / f"{config.dataset_name.lower()}_gnn_samples.json",
+    results = {"ecfp_lr": baseline_metrics, "hybrid_gat": hybrid_metrics}
+    prediction_rows = []
+    for model_name, artifacts in [("ecfp_lr", baseline_artifacts), ("hybrid_gat", hybrid_artifacts)]:
+        for idx, (prediction, target) in enumerate(zip(artifacts.predictions, artifacts.targets)):
+            prediction_rows.append({"model": model_name, "index": idx, "prediction": float(prediction), "target": float(target)})
+
+    print(f"\n--- Generating Outputs ---")
+    top_atom = None
+    if bundle.test_dataset:
+        print(f"Visualizing attention...")
+        scores, _ = visualize_attention(hybrid, bundle.test_dataset[0], output_dirs["attention"] / "sample.png", device)
+        best_idx = int(max(range(len(scores)), key=lambda idx: scores[idx]))
+        from rdkit import Chem
+
+        mol = Chem.MolFromSmiles(bundle.test_dataset[0].smiles)
+        top_atom = {"atom_index": best_idx, "atom_symbol": mol.GetAtomWithIdx(best_idx).GetSymbol(), "importance": scores[best_idx]}
+        print(f"✓ Top atom: {top_atom['atom_symbol']} (index {top_atom['atom_index']}, score {top_atom['importance']:.4f})")
+
+    save_results(results, output_dirs["root"])
+    save_predictions(prediction_rows, output_dirs["root"])
+    plot_loss(history, output_dirs["plots"] / "hybrid_gat_loss.png")
+    score_metric = "roc_auc" if bundle.task_type == "classification" else "rmse"
+    plot_bar(results, score_metric, output_dirs["plots"] / f"{dataset_name.lower()}_score.png", bundle.task_type == "regression")
+    plot_bar(results, "params", output_dirs["plots"] / f"{dataset_name.lower()}_params.png", True)
+    plot_bar(results, "epoch_time", output_dirs["plots"] / f"{dataset_name.lower()}_epoch_time.png", True)
+    plot_bar(results, "latency_ms", output_dirs["plots"] / f"{dataset_name.lower()}_latency.png", True)
+    if bundle.task_type == "classification":
+        plot_roc(
+            baseline_artifacts.targets,
+            baseline_artifacts.predictions,
+            hybrid_artifacts.predictions,
+            ("ecfp_lr", "hybrid_gat"),
+            output_dirs["plots"] / "roc.png",
         )
+    write_case_study(output_dirs["root"], dataset_name, bundle.task_type, results, top_atom)
+    print(f"✓ All outputs saved to outputs/")
 
-    explanation_target = dataset_bundle.test_dataset[0]
-    report = compute_atom_importance(trainer.model, explanation_target, device=device, task_type=config.task_type)
-    print(f"\nInterpretability sample ({display_name})")
-    print(f"SMILES: {explanation_target.smiles}")
-    print(format_atom_importance(report))
-    save_atom_importance(
-        report,
-        directories["interpretability"] / f"{config.dataset_name.lower()}_{artifact_key}_atom_importance{run_suffix}.json",
-    )
-    if variant == "mpnn" and not run_suffix:
-        save_atom_importance(
-            report,
-            directories["interpretability"] / f"{config.dataset_name.lower()}_atom_importance.json",
-        )
-    if explain and variant == "gat":
-        image_path = Path("outputs") / "attention" / f"{config.dataset_name.lower()}_{artifact_key}{run_suffix}.png"
-        scores, saved_path = visualize_attention(trainer.model, explanation_target, image_path, device)
-        print(f"Saved attention visualization to {saved_path}")
-        print(f"Attention scores: {[round(score, 4) for score in scores]}")
-    return artifacts.metrics, artifacts
-
-
-def run_single_experiment(
-    config: ExperimentConfig,
-    args: argparse.Namespace,
-    directories: dict[str, Path],
-    run_suffix: str = "",
-) -> dict[str, dict[str, float]]:
-    set_random_seed(config.random_seed)
-    print(f"Loading dataset: {config.dataset_name}")
-    dataset_bundle = load_dataset_bundle(config)
-    print(
-        f"Loaded {len(dataset_bundle.train_dataset)} train / "
-        f"{len(dataset_bundle.val_dataset)} val / "
-        f"{len(dataset_bundle.test_dataset)} test molecules."
-    )
-    print(f"Task type: {config.task_type}")
-
-    results: dict[str, dict[str, float]] = {}
-
-    if args.model in {"baseline", "both"}:
-        baseline_metrics, _ = run_baseline(config, dataset_bundle, directories, run_suffix)
-        results["baseline"] = baseline_metrics
-
-    if args.model in {"gnn", "both"}:
-        for variant in resolve_gnn_variants(args.gnn_type):
-            gnn_metrics, _ = run_gnn_variant(config, dataset_bundle, directories, variant, run_suffix, args.explain)
-            results[str(GNN_VARIANTS[variant]["result_key"])] = gnn_metrics
-
-    return results
-
-
-def main() -> None:
-    args = parse_args()
-    dataset_name = normalize_dataset_name(args.dataset)
-
-    config = ExperimentConfig(
-        dataset_name=dataset_name,
-        batch_size=args.batch_size,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        max_epochs=args.epochs,
-        patience=args.patience,
-        scheduler_patience=args.scheduler_patience,
-        grad_clip_norm=args.grad_clip_norm,
-        standardize_targets=not args.no_standardize_targets,
-        random_seed=args.seed,
-        fingerprint_n_bits=args.fingerprint_bits,
-        fingerprint_radius=args.fingerprint_radius,
-    )
-
-    directories = ensure_output_dirs(config)
-    seeds = parse_seeds(args)
-
-    if args.plots_only:
-        suffix = "_multiseed_summary" if len(seeds) > 1 else "_metrics"
-        json_path = directories["results"] / f"{config.dataset_name.lower()}{suffix}.json"
-        results = load_results(json_path)
-        primary_metric, lower_is_better = primary_metric_for_task(config.task_type)
-        metric_name = f"{primary_metric}_mean" if len(seeds) > 1 else primary_metric
-        comparison_name = f"{config.dataset_name.lower()}_multiseed_comparison.png" if len(seeds) > 1 else f"{config.dataset_name.lower()}_comparison.png"
-        prefix = f"{config.dataset_name.lower()}_multiseed" if len(seeds) > 1 else config.dataset_name.lower()
-        plot_model_comparison(results, directories["plots"] / comparison_name, metric_name, lower_is_better)
-        generate_metric_plots(results, directories["plots"], prefix, config.task_type)
-        print(f"Regenerated plots from {json_path}.")
-        return
-
-    if len(seeds) > 1:
-        seed_results: list[dict[str, object]] = []
-        for seed in seeds:
-            print(f"\n=== Seed {seed} ===")
-            seed_config = replace(config, random_seed=seed)
-            results = run_single_experiment(seed_config, args, directories, run_suffix=f"_seed_{seed}")
-            for model_name, metrics in results.items():
-                seed_results.append({"seed": seed, "model": model_name, "metrics": metrics})
-
-        summary = aggregate_seed_results(seed_results)
-        print("\nMulti-seed summary")
-        print(render_metrics_table(summary))
-        runs_path, summary_csv_path, summary_json_path = save_multiseed_results(
-            seed_results,
-            summary,
-            directories["results"],
-            config.dataset_name,
-        )
-        primary_metric, lower_is_better = primary_metric_for_task(config.task_type)
-        plot_model_comparison(
-            summary,
-            directories["plots"] / f"{config.dataset_name.lower()}_multiseed_comparison.png",
-            f"{primary_metric}_mean",
-            lower_is_better,
-        )
-        generate_metric_plots(summary, directories["plots"], f"{config.dataset_name.lower()}_multiseed", config.task_type)
-        print(f"\nSaved multi-seed runs to {runs_path}.")
-        print(f"Saved multi-seed summary to {summary_csv_path} and {summary_json_path}.")
-        return
-
-    results = run_single_experiment(config, args, directories)
-
-    if results:
-        print("\nComparison")
-        print(render_metrics_table(results))
-        json_path, csv_path = save_results(results, directories["results"], config.dataset_name)
-        primary_metric, lower_is_better = primary_metric_for_task(config.task_type)
-        plot_model_comparison(
-            results,
-            directories["plots"] / f"{config.dataset_name.lower()}_comparison.png",
-            primary_metric,
-            lower_is_better,
-        )
-        generate_metric_plots(results, directories["plots"], config.dataset_name.lower(), config.task_type)
-        print(f"\nSaved metrics to {json_path} and {csv_path}.")
+    print(f"\n===== FINAL RESULTS =====")
+    print(f"Model: Hybrid ECFP + GAT")
+    print(f"Dataset: {dataset_name}")
+    if bundle.task_type == "classification":
+        print(f"ROC-AUC: {hybrid_metrics['roc_auc']:.4f}")
+        print(f"F1: {hybrid_metrics['f1']:.4f}")
+    else:
+        print(f"RMSE: {hybrid_metrics['rmse']:.4f}")
+    print(f"Epoch Time: {hybrid_metrics['epoch_time']:.4f}s")
+    print(f"Params: {hybrid_metrics['params']:.0f}")
+    print(f"Latency: {hybrid_metrics['latency_ms']:.4f}ms")
+    print(f"=============================\n")
 
 
 if __name__ == "__main__":

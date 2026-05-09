@@ -38,6 +38,7 @@ def visualize_attention(model, data: Data, output_path: str | Path, device: torc
             data.edge_index.to(device),
             data.edge_attr.to(device),
             batch,
+            data.fingerprint.to(device).view(1, -1),
             return_attention=True,
         )
 

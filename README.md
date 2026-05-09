@@ -1,228 +1,112 @@
-# GraphMolAI
+# MolGraphX
 
-GraphMolAI is a production-style molecular property prediction project that compares classical fingerprint baselines against Graph Neural Networks on MoleculeNet datasets. It downloads data automatically, trains both model families, evaluates them with task-appropriate metrics, and produces a simple atom-level interpretability report for GNN predictions.
+Minimal hybrid molecular learning case study.
 
-## Features
+## Idea
 
-- Automatic MoleculeNet dataset download for `ESOL`, `BBBP`, and `HIV`
-- RDKit-based graph featurization with atom and bond descriptors
-- ECFP fingerprint baseline
-- Logistic regression for classification datasets and Ridge regression for ESOL regression
-- Message Passing Neural Network (MPNN) implemented with PyTorch Geometric
-- Attention GNN with edge-aware graph attention layers
-- MPNN++ with residual edge-conditioned message passing and multi-pool readout
-- GAT model with attention extraction and molecule highlighting
-- Early stopping, checkpointing, saved training curves, and persisted metrics
-- Gradient-based atom importance for a sample test molecule
-- Attention PNG outputs for GAT explanations
-- Plot regeneration without retraining
+Compare:
 
-## Project Structure
+- `ecfp_lr`: ECFP fingerprint + Logistic Regression
+- `hybrid_gat`: 2-layer GAT + ECFP fusion
+
+Goal:
+
+- strong score
+- low extra cost
+- attention-based atom explanation
+
+## Architecture
 
 ```text
-molgraphx/
-├── data/
-│   └── loaders/
-│       └── dataset.py
-├── evaluation/
-│   └── evaluate.py
-├── features/
-│   └── fingerprint.py
-├── interpretability/
-│   └── atom_importance.py
-│   └── visualize_attention.py
-├── models/
-│   ├── baseline/
-│   │   └── fingerprint_model.py
-│   └── gnn/
-│       ├── attention_gnn.py
-│       ├── gat.py
-│       ├── mpnn.py
-│       └── mpnnpp.py
-├── training/
-│   ├── metrics.py
-│   └── trainer.py
-└── utils/
-    └── config.py
-main.py
-requirements.txt
-requirements-cuda.txt
-explanation.txt
+SMILES
+ -> graph + ECFP
+
+baseline:
+ECFP -> Logistic Regression
+
+hybrid:
+graph -> GAT -> GAT -> mean pool
+graph embedding + ECFP -> fusion MLP -> prediction
 ```
 
-## Quick Start
+## Datasets
 
-CPU:
+- `BBBP`: ROC-AUC, F1
+- `ESOL`: RMSE
 
+## Run
+
+### Setup
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-CUDA GPU:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install --no-cache-dir -r requirements-cuda.txt
-```
-
-Run default 5-model comparison:
-
-```powershell
-.\.venv\Scripts\python main.py --model both --gnn-type all --dataset ESOL
-```
-
-## Setup Details
-
-1. Create and activate a Python 3.10+ environment.
-2. Install dependencies:
-
-```bash
 pip install -r requirements.txt
 ```
 
-For NVIDIA GPU training on Windows, use the CUDA environment:
+### Execute
 
+**Blood-Brain Barrier Classification (BBBP)**
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install --no-cache-dir -r requirements-cuda.txt
+python -u main.py --dataset BBBP --epochs 80
 ```
 
-## Models Used
-
-- `baseline`: ECFP fingerprint + sklearn
-- `mpnn`: message passing GNN
-- `attention`: attention-based GNN
-- `mpnnpp`: stronger residual MPNN
-- `gat`: graph attention network with attention visualization
-
-## Main Commands
-
-Default full comparison, 5 techniques:
-
+**Solubility Prediction (ESOL)**
 ```powershell
-.\.venv\Scripts\python main.py --model both --gnn-type all --dataset ESOL
+python -u main.py --dataset ESOL --epochs 80
 ```
 
-Run on BBBP:
-
+**Custom Configuration**
 ```powershell
-.\.venv\Scripts\python main.py --model both --gnn-type all --dataset BBBP
-```
-
-Run only baseline:
-
-```powershell
-.\.venv\Scripts\python main.py --model baseline --dataset ESOL
-```
-
-Run one model only:
-
-```powershell
-.\.venv\Scripts\python main.py --model gnn --gnn-type mpnn --dataset ESOL
-.\.venv\Scripts\python main.py --model gnn --gnn-type attention --dataset ESOL
-.\.venv\Scripts\python main.py --model gnn --gnn-type mpnnpp --dataset ESOL
-.\.venv\Scripts\python main.py --model gnn --gnn-type gat --dataset ESOL
-```
-
-Run with GAT explanation PNG:
-
-```powershell
-.\.venv\Scripts\python main.py --model gnn --gnn-type gat --dataset ESOL --explain true
-.\.venv\Scripts\python main.py --model gnn --gnn-type gat --dataset BBBP --explain true
-```
-
-Optimized MPNN++ run:
-
-```powershell
-.\.venv\Scripts\python main.py --model gnn --dataset ESOL --gnn-type mpnnpp --epochs 150 --patience 25 --hidden-dim 256 --num-layers 4 --dropout 0.1 --learning-rate 0.0003
-```
-
-Multi-seed research run:
-
-```powershell
-.\.venv\Scripts\python main.py --model both --dataset ESOL --gnn-type all --seeds 0,1,2,3,4 --epochs 150 --patience 25 --hidden-dim 256 --num-layers 4 --dropout 0.1 --learning-rate 0.0003
-```
-
-Regenerate plots only, no retraining:
-
-```powershell
-.\.venv\Scripts\python main.py --dataset ESOL --plots-only true
-.\.venv\Scripts\python main.py --dataset ESOL --seeds 0,1,2,3,4 --plots-only true
+python -u main.py --dataset BBBP --epochs 100 --batch-size 32 --seed 42
 ```
 
 ## Outputs
 
-Artifacts are saved under `artifacts/<dataset_name>/`:
+- `outputs/results.csv` - model metrics comparison
+- `outputs/metrics.json` - full benchmark results
+- `outputs/predictions.csv` - per-sample predictions
+- `outputs/case_study.md` - analysis report
+- `outputs/plots/` - visualization charts
+- `outputs/attention/sample.png` - attention heatmap
+- `outputs/checkpoints/` - saved model weights
 
-- `checkpoints/`: best GNN model checkpoint
-- `plots/`: training curve plots
-- `plots/`: metric bars, heatmap, rank plot, comparison plot
-- `results/`: metrics table in JSON and CSV, saved training history, and sample predictions
-- `results/`: multi-seed run logs and mean/std summaries when `--seeds` is used
-- `interpretability/`: atom importance scores for a sample test molecule
-- `outputs/attention/`: GAT attention PNGs
+## Results Interpretation
 
-Important files:
+### Metrics
 
-- [explanation.txt](</c:/Users/musta/OneDrive/Desktop/DL CASE STUDY/code/explanation.txt>): short plain-language project explanation
-- [requirements.txt](</c:/Users/musta/OneDrive/Desktop/DL CASE STUDY/code/requirements.txt>): CPU environment
-- [requirements-cuda.txt](</c:/Users/musta/OneDrive/Desktop/DL CASE STUDY/code/requirements-cuda.txt>): CUDA environment
+**Classification (BBBP):**
+- `ROC-AUC`: Receiver Operating Characteristic Area Under Curve (higher is better, max 1.0)
+- `F1`: Harmonic mean of precision/recall (higher is better, max 1.0)
 
-## Metrics
+**Regression (ESOL):**
+- `RMSE`: Root Mean Square Error (lower is better, measures prediction error)
 
-- `ESOL` uses regression metrics: `RMSE` and `MAE`
-- `BBBP` and `HIV` use classification metrics: `ROC-AUC` and `Accuracy`
+### Model Comparison
 
-## Example Workflow
+| Metric | Meaning | Baseline | Hybrid | Winner |
+|--------|---------|----------|--------|--------|
+| ROC-AUC/RMSE | Accuracy | Traditional ECFP | Graph Neural Net | Higher/Lower |
+| Params | Model complexity | ~0 | ~70K | Lower is simpler |
+| Epoch Time | Training speed | - | ~2-4s | Lower is faster |
+| Latency | Inference speed | ~0.02ms | ~0.6ms | Lower is faster |
 
-When you run `python main.py`, the project will:
+### Interpreting case_study.md
 
-1. Download and prepare the selected MoleculeNet dataset automatically
-2. Build RDKit fingerprints for the baseline model
-3. Train the baseline model and report test metrics
-4. Train MPNN, Attention GNN, MPNN++, and GAT with validation-based early stopping
-5. Compare all five models in a printed metrics table
-6. Save sample prediction outputs, plots, and interpretability outputs
+- **Benchmark Table**: Direct comparison of both approaches
+- **Efficiency Comparison**: Speed vs accuracy tradeoff
+- **Interpretability Insight**: Top atom identified by attention mechanism
 
-## Research Upgrades
+## Reproducibility
 
-- Regression GNNs standardize targets during training and unscale predictions for final metrics.
-- Training uses gradient clipping and `ReduceLROnPlateau` scheduling for better stability.
-- `--seeds` enables repeated experiments and saves aggregate mean/std tables.
-- Comparison plots are saved automatically under `artifacts/<dataset_name>/plots/`.
-- `--explain true` saves molecule attention images for GAT.
-- `--plots-only true` rebuilds visual outputs from saved metrics.
+- deterministic seed (default: 42)
+- AMP (Automatic Mixed Precision) on CUDA
+- early stopping with patience=10
+- stratified train/val/test split
+- fixed hyperparameters: hidden_dim=32, heads=2, dropout=0.3
 
-## Troubleshooting
+## Attention Visualization
 
-If PowerShell blocks venv activation:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-If GPU is installed but not used:
-
-```powershell
-.\.venv\Scripts\python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
-```
-
-If VRAM is low, reduce batch size:
-
-```powershell
-.\.venv\Scripts\python main.py --model both --gnn-type all --dataset ESOL --batch-size 32
-```
-
-## Notes
-
-- `torch-geometric` may install binary dependencies automatically from PyPI. If your environment has trouble resolving PyG wheels, use the official PyTorch Geometric install instructions that match your local PyTorch version.
-- The classification baseline uses logistic regression. For `ESOL`, the project switches to Ridge regression because logistic regression is classification-only.
-- The baseline is fingerprint-based and intentionally simple, while the GNN variants test learned graph structure, attention weighting, stronger message passing, and explicit GAT explanations.
+`outputs/attention/sample.png` shows:
+- Molecule structure
+- Atom importance scores (darker red = higher importance)
+- Top-scoring atom identified by GAT attention weights

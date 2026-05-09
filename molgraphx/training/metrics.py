@@ -3,34 +3,27 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_error, roc_auc_score
+from sklearn.metrics import f1_score, mean_squared_error, roc_auc_score
 
 
-def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(math.sqrt(mean_squared_error(y_true, y_pred)))
-
-
-def compute_metrics(task_type: str, y_true: np.ndarray, predictions: np.ndarray) -> dict[str, float]:
+def compute_metrics(task_type: str, y_true: np.ndarray, predictions: np.ndarray, threshold: float = 0.5) -> dict[str, float]:
     y_true = np.asarray(y_true, dtype=np.float32).reshape(-1)
     predictions = np.asarray(predictions, dtype=np.float32).reshape(-1)
-
     if task_type == "classification":
-        binary_predictions = (predictions >= 0.5).astype(np.int64)
-        try:
-            roc_auc = float(roc_auc_score(y_true, predictions))
-        except ValueError:
-            roc_auc = float("nan")
-        metrics = {
-            "roc_auc": roc_auc,
-            "accuracy": float(accuracy_score(y_true, binary_predictions)),
+        return {
+            "roc_auc": float(roc_auc_score(y_true, predictions)),
+            "f1": float(f1_score(y_true, (predictions >= threshold).astype(np.int64), zero_division=0)),
         }
-    else:
-        metrics = {
-            "rmse": rmse(y_true, predictions),
-            "mae": float(mean_absolute_error(y_true, predictions)),
-        }
-    return metrics
+    return {"rmse": float(math.sqrt(mean_squared_error(y_true, predictions)))}
 
 
-def format_metrics(metrics: dict[str, float]) -> str:
-    return ", ".join(f"{name}={value:.4f}" for name, value in metrics.items())
+def best_f1_threshold(y_true: np.ndarray, predictions: np.ndarray) -> float:
+    y_true = np.asarray(y_true, dtype=np.float32).reshape(-1)
+    predictions = np.asarray(predictions, dtype=np.float32).reshape(-1)
+    thresholds = np.linspace(0.2, 0.8, 25, dtype=np.float32)
+    best_threshold, best_score = 0.5, -1.0
+    for threshold in thresholds:
+        score = f1_score(y_true, (predictions >= threshold).astype(np.int64), zero_division=0)
+        if score > best_score:
+            best_threshold, best_score = float(threshold), float(score)
+    return best_threshold
